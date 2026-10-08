@@ -324,7 +324,22 @@ public class PacManGame extends JFrame {
                 options = open; // dead end: turn back
             if (options.isEmpty())
                 return;
-            int[] chosen = options.get(RNG.nextInt(options.size()));
+            int[] chosen;
+            if (RNG.nextDouble() < 0.50) {
+                chosen = options.get(0);
+                double minDist = Double.MAX_VALUE;
+                for (int[] d : options) {
+                    double nextX = (col + d[0]) * TILE_SIZE + TILE_SIZE / 2.0;
+                    double nextY = (row + d[1]) * TILE_SIZE + TILE_SIZE / 2.0;
+                    double dist = Math.hypot(pacman.x - nextX, pacman.y - nextY);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        chosen = d;
+                    }
+                }
+            } else {
+                chosen = options.get(RNG.nextInt(options.size()));
+            }
             dirX = chosen[0];
             dirY = chosen[1];
             targetCol = col + chosen[0];
@@ -374,19 +389,34 @@ public class PacManGame extends JFrame {
     // ------------------------------------------------------------------
     // GAME LOGIC
     // ------------------------------------------------------------------
+    static boolean isTileBlocked(int c, int r) {
+        if (r < 0 || r >= ROWS || c < 0 || c >= COLS)
+            return true;
+        return currentMap[r][c] == 1;
+    }
+
     static boolean isWallCollision(double x, double y) {
-        double radius = pacman.radius - 1;
+        double radius = pacman.radius - 2;
         double[][] pts = { { x - radius, y - radius }, { x + radius, y - radius }, { x - radius, y + radius },
                 { x + radius, y + radius } };
         for (double[] p : pts) {
             int gx = (int) Math.floor(p[0] / TILE_SIZE);
             int gy = (int) Math.floor(p[1] / TILE_SIZE);
-            if (gy < 0 || gy >= ROWS || gx < 0 || gx >= COLS)
-                return true;
-            if (currentMap[gy][gx] == 1)
+            if (isTileBlocked(gx, gy))
                 return true;
         }
         return false;
+    }
+
+    static void updatePacFacing() {
+        if (pacman.dirX == 1)
+            pacman.facing = "right";
+        else if (pacman.dirX == -1)
+            pacman.facing = "left";
+        else if (pacman.dirY == 1)
+            pacman.facing = "down";
+        else if (pacman.dirY == -1)
+            pacman.facing = "up";
     }
 
     static void updateGame() {
@@ -400,30 +430,120 @@ public class PacManGame extends JFrame {
                     g.frightened = false;
         }
 
-        // queued turn
+        // --- Grid-aligned cornering & turn-queueing ---
+        int pacCol = (int) Math.round((pacman.x - TILE_SIZE / 2.0) / TILE_SIZE);
+        int pacRow = (int) Math.round((pacman.y - TILE_SIZE / 2.0) / TILE_SIZE);
+        pacCol = Math.max(0, Math.min(COLS - 1, pacCol));
+        pacRow = Math.max(0, Math.min(ROWS - 1, pacRow));
+
+        double centerX = pacCol * TILE_SIZE + TILE_SIZE / 2.0;
+        double centerY = pacRow * TILE_SIZE + TILE_SIZE / 2.0;
+        double turnTolerance = Math.min(8.0, TILE_SIZE / 2.0);
+
+        // 1. Process queued direction change
         if (pacman.nextDirX != 0 || pacman.nextDirY != 0) {
-            double tx = pacman.x + pacman.nextDirX * pacman.speed;
-            double ty = pacman.y + pacman.nextDirY * pacman.speed;
-            if (!isWallCollision(tx, ty)) {
+            if (pacman.nextDirX == pacman.dirX && pacman.nextDirY == pacman.dirY) {
+                pacman.nextDirX = 0;
+                pacman.nextDirY = 0;
+            } else if (pacman.nextDirX == -pacman.dirX && pacman.nextDirY == -pacman.dirY
+                    && (pacman.dirX != 0 || pacman.dirY != 0)) {
                 pacman.dirX = pacman.nextDirX;
                 pacman.dirY = pacman.nextDirY;
-                if (pacman.dirX == 1)
-                    pacman.facing = "right";
-                if (pacman.dirX == -1)
-                    pacman.facing = "left";
-                if (pacman.dirY == 1)
-                    pacman.facing = "down";
-                if (pacman.dirY == -1)
-                    pacman.facing = "up";
+                pacman.nextDirX = 0;
+                pacman.nextDirY = 0;
+                updatePacFacing();
+            } else if (pacman.dirX == 0 && pacman.dirY == 0) {
+                if (!isTileBlocked(pacCol + pacman.nextDirX, pacRow + pacman.nextDirY)) {
+                    pacman.x = centerX;
+                    pacman.y = centerY;
+                    pacman.dirX = pacman.nextDirX;
+                    pacman.dirY = pacman.nextDirY;
+                    pacman.nextDirX = 0;
+                    pacman.nextDirY = 0;
+                    updatePacFacing();
+                }
+            } else if (pacman.nextDirX != 0 && pacman.dirY != 0) {
+                if (!isTileBlocked(pacCol + pacman.nextDirX, pacRow) && Math.abs(pacman.y - centerY) <= turnTolerance) {
+                    pacman.y = centerY;
+                    pacman.dirX = pacman.nextDirX;
+                    pacman.dirY = 0;
+                    pacman.nextDirX = 0;
+                    pacman.nextDirY = 0;
+                    updatePacFacing();
+                }
+            } else if (pacman.nextDirY != 0 && pacman.dirX != 0) {
+                if (!isTileBlocked(pacCol, pacRow + pacman.nextDirY) && Math.abs(pacman.x - centerX) <= turnTolerance) {
+                    pacman.x = centerX;
+                    pacman.dirX = 0;
+                    pacman.dirY = pacman.nextDirY;
+                    pacman.nextDirX = 0;
+                    pacman.nextDirY = 0;
+                    updatePacFacing();
+                }
             }
         }
 
-        // move
-        double nx = pacman.x + pacman.dirX * pacman.speed;
-        double ny = pacman.y + pacman.dirY * pacman.speed;
-        if (!isWallCollision(nx, ny)) {
-            pacman.x = nx;
-            pacman.y = ny;
+        // 2. Move Pac-Man in current direction
+        if (pacman.dirX != 0) {
+            pacman.y = centerY;
+            double nx = pacman.x + pacman.dirX * pacman.speed;
+            if (pacman.dirX == 1) {
+                if (isTileBlocked(pacCol + 1, pacRow) && nx >= centerX) {
+                    pacman.x = centerX;
+                    pacman.dirX = 0;
+                    if (pacman.nextDirY != 0 && !isTileBlocked(pacCol, pacRow + pacman.nextDirY)) {
+                        pacman.dirY = pacman.nextDirY;
+                        pacman.nextDirY = 0;
+                        updatePacFacing();
+                        pacman.y += pacman.dirY * pacman.speed;
+                    }
+                } else {
+                    pacman.x = nx;
+                }
+            } else if (pacman.dirX == -1) {
+                if (isTileBlocked(pacCol - 1, pacRow) && nx <= centerX) {
+                    pacman.x = centerX;
+                    pacman.dirX = 0;
+                    if (pacman.nextDirY != 0 && !isTileBlocked(pacCol, pacRow + pacman.nextDirY)) {
+                        pacman.dirY = pacman.nextDirY;
+                        pacman.nextDirY = 0;
+                        updatePacFacing();
+                        pacman.y += pacman.dirY * pacman.speed;
+                    }
+                } else {
+                    pacman.x = nx;
+                }
+            }
+        } else if (pacman.dirY != 0) {
+            pacman.x = centerX;
+            double ny = pacman.y + pacman.dirY * pacman.speed;
+            if (pacman.dirY == 1) {
+                if (isTileBlocked(pacCol, pacRow + 1) && ny >= centerY) {
+                    pacman.y = centerY;
+                    pacman.dirY = 0;
+                    if (pacman.nextDirX != 0 && !isTileBlocked(pacCol + pacman.nextDirX, pacRow)) {
+                        pacman.dirX = pacman.nextDirX;
+                        pacman.nextDirX = 0;
+                        updatePacFacing();
+                        pacman.x += pacman.dirX * pacman.speed;
+                    }
+                } else {
+                    pacman.y = ny;
+                }
+            } else if (pacman.dirY == -1) {
+                if (isTileBlocked(pacCol, pacRow - 1) && ny <= centerY) {
+                    pacman.y = centerY;
+                    pacman.dirY = 0;
+                    if (pacman.nextDirX != 0 && !isTileBlocked(pacCol + pacman.nextDirX, pacRow)) {
+                        pacman.dirX = pacman.nextDirX;
+                        pacman.nextDirX = 0;
+                        updatePacFacing();
+                        pacman.x += pacman.dirX * pacman.speed;
+                    }
+                } else {
+                    pacman.y = ny;
+                }
+            }
         }
 
         // eat food & power pellets
@@ -1440,8 +1560,13 @@ public class PacManGame extends JFrame {
         pause.addActionListener(e -> togglePause("PRESS PAUSE TO RESUME"));
         bottom.add(back, BorderLayout.WEST);
         mapCaption.setHorizontalAlignment(SwingConstants.CENTER);
-        bottom.add(mapCaption, BorderLayout.CENTER);
-        bottom.add(pause, BorderLayout.EAST);
+        JPanel east = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
+        east.setOpaque(false);
+        east.add(pause);
+        ArcadeButton exitBtn = smallButton("EXIT");
+        exitBtn.addActionListener(e -> showExit());
+        east.add(exitBtn);
+        bottom.add(east, BorderLayout.EAST);
         screen.add(bottom, BorderLayout.SOUTH);
         return screen;
     }
@@ -1925,40 +2050,78 @@ public class PacManGame extends JFrame {
         p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
         p.setBorder(new EmptyBorder(8, 12, 8, 12));
 
-        JLabel t = label("GAME TERMINATED", pixel(24f), RED500);
+        JLabel t = label("EXIT GAME", pixel(24f), RED500);
         t.setAlignmentX(CENTER_ALIGNMENT);
         JLabel s = label("THANKS FOR PLAYING PAC-MAN!", vt(28f), SLATE300);
         s.setAlignmentX(CENTER_ALIGNMENT);
         PulseIcon icon = new PulseIcon();
         icon.setAlignmentX(CENTER_ALIGNMENT);
-        ArcadeButton restart = new ArcadeButton("RESTART MACHINE", ICON_NONE, RED950, RED500, RED200, 12f, false, 8);
-        restart.setPreferredSize(new Dimension(440, 56));
-        restart.setMaximumSize(new Dimension(Integer.MAX_VALUE, 56));
-        restart.setAlignmentX(CENTER_ALIGNMENT);
+
+        ArcadeButton exitBtn = new ArcadeButton("YES, EXIT GAME", ICON_NONE, RED950, RED500, RED200, 12f, false, 8);
+        exitBtn.setPreferredSize(new Dimension(440, 52));
+        exitBtn.setMaximumSize(new Dimension(Integer.MAX_VALUE, 52));
+        exitBtn.setAlignmentX(CENTER_ALIGNMENT);
+        exitBtn.addActionListener(e -> System.exit(0));
+
+        ArcadeButton cancelBtn = new ArcadeButton("CANCEL", ICON_NONE, SLATE800, SLATE600, GRAY300, 12f, false, 8);
+        cancelBtn.setPreferredSize(new Dimension(440, 48));
+        cancelBtn.setMaximumSize(new Dimension(Integer.MAX_VALUE, 48));
+        cancelBtn.setAlignmentX(CENTER_ALIGNMENT);
 
         p.add(t);
         p.add(Box.createVerticalStrut(14));
         p.add(s);
         p.add(Box.createVerticalStrut(10));
         p.add(icon);
-        p.add(Box.createVerticalStrut(10));
-        p.add(restart);
+        p.add(Box.createVerticalStrut(12));
+        p.add(exitBtn);
+        p.add(Box.createVerticalStrut(8));
+        p.add(cancelBtn);
 
         JDialog d = makeDialog(p, RED500, new Color(239, 68, 68), modal);
-        restart.addActionListener(e -> d.dispose());
+        cancelBtn.addActionListener(e -> d.dispose());
+
+        d.getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW).put(KeyStroke.getKeyStroke("ENTER"), "confirmExit");
+        d.getRootPane().getActionMap().put("confirmExit", new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                System.exit(0);
+            }
+        });
         return d;
     }
 
     void showHowToPlay() {
+        boolean wasPaused = gamePaused;
+        if (gameStarted && !gamePaused) {
+            gamePaused = true;
+        }
         buildHowToPlay(true).setVisible(true);
+        if (gameStarted && !wasPaused && !gameOver) {
+            gamePaused = false;
+        }
     }
 
     void showAboutUs() {
+        boolean wasPaused = gamePaused;
+        if (gameStarted && !gamePaused) {
+            gamePaused = true;
+        }
         buildAboutUs(true).setVisible(true);
+        if (gameStarted && !wasPaused && !gameOver) {
+            gamePaused = false;
+        }
     }
 
     void showExit() {
+        boolean wasPaused = gamePaused;
+        if (gameStarted && !gamePaused) {
+            gamePaused = true;
+        }
         buildExit(true).setVisible(true);
+        if (gameStarted && !wasPaused && !gameOver) {
+            gamePaused = false;
+        }
     }
 
     // ------------------------------------------------------------------
