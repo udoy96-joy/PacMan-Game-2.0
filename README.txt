@@ -20,3 +20,7 @@ YOUR OWN FILES (all optional)
                      Without them a plain monospaced font is used.
 
 CONTROLS  Arrows / WASD = move, P = pause, Enter/Esc = close a window.
+
+GAME FLOW  Choose a map and enter a player name (up to 12 characters) before
+           starting. Scores are saved automatically to the local TOP 10
+           leaderboard, which remains available after restarting the game.

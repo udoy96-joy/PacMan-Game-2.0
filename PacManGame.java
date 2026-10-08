@@ -10,11 +10,23 @@ import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
+import java.util.UUID;
+import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.prefs.Preferences;
+import java.util.prefs.BackingStoreException;
+import javax.swing.text.AbstractDocument;
+import javax.swing.text.AttributeSet;
+import javax.swing.text.BadLocationException;
+import javax.swing.text.DocumentFilter;
 
 /**
  * PAC-MAN ARCADE EDITION - Java Swing version (single file).
@@ -223,6 +235,9 @@ public class PacManGame extends JFrame {
     static int score = 0;
     static int highScore;
     static int lives = 3;
+    static String playerName = "";
+    static String currentLeaderboardEntryId;
+    static boolean scoreRecordedForGame = false;
     static boolean gameOver = false;
     static boolean gamePaused = false;
     static boolean gameStarted = false;
@@ -230,7 +245,97 @@ public class PacManGame extends JFrame {
     static int[][] currentMap = copyMap();
 
     static final Preferences PREFS = Preferences.userNodeForPackage(PacManGame.class);
+    static final String LEADERBOARD_KEY = "pacman_leaderboard_v1";
+    static final DateTimeFormatter SCORE_DATE_FORMAT = DateTimeFormatter.ofPattern("MM/dd/yy", Locale.US);
     static final Random RNG = new Random();
+
+    static class LeaderboardEntry {
+        final String id;
+        final String playerName;
+        final int score;
+        final String map;
+        final String date;
+        final long recordedAt;
+
+        LeaderboardEntry(String id, String playerName, int score, String map, String date, long recordedAt) {
+            this.id = id;
+            this.playerName = playerName;
+            this.score = score;
+            this.map = map;
+            this.date = date;
+            this.recordedAt = recordedAt;
+        }
+    }
+
+    static List<LeaderboardEntry> loadLeaderboard() {
+        String saved = PREFS.get(LEADERBOARD_KEY, "");
+        List<LeaderboardEntry> entries = new ArrayList<>();
+        if (saved.isEmpty())
+            return entries;
+
+        try {
+            for (String line : saved.split("\n")) {
+                String[] fields = line.split("\\|", -1);
+                if (fields.length != 6)
+                    throw new IllegalArgumentException("Invalid leaderboard record format.");
+                String id = UUID.fromString(fields[0]).toString();
+                int entryScore = Integer.parseInt(fields[1]);
+                String map = fields[2];
+                String date = fields[3];
+                long recordedAt = Long.parseLong(fields[4]);
+                String name = new String(Base64.getUrlDecoder().decode(fields[5]), StandardCharsets.UTF_8);
+                int mapNumber = map.startsWith("MAP-") ? Integer.parseInt(map.substring(4)) : -1;
+                if (entryScore < 0 || recordedAt < 0 || name.isEmpty() || name.length() > 12
+                        || name.trim().isEmpty() || mapNumber < 1 || mapNumber > MAPS.length
+                        || !date.matches("\\d{2}/\\d{2}/\\d{2}"))
+                    throw new IllegalArgumentException("Invalid leaderboard record values.");
+                entries.add(new LeaderboardEntry(id, name, entryScore, map, date, recordedAt));
+            }
+        } catch (IllegalArgumentException ex) {
+            throw new IllegalStateException("The saved leaderboard data is invalid.", ex);
+        }
+
+        if (entries.size() > 10)
+            throw new IllegalStateException("The saved leaderboard contains more than 10 records.");
+        sortLeaderboard(entries);
+        return entries;
+    }
+
+    static void sortLeaderboard(List<LeaderboardEntry> entries) {
+        entries.sort(Comparator.comparingInt((LeaderboardEntry entry) -> entry.score).reversed()
+                .thenComparingLong(entry -> entry.recordedAt));
+    }
+
+    static void saveLeaderboardEntry() throws BackingStoreException {
+        String name = playerName.trim();
+        if (name.isEmpty() || name.length() > 12)
+            throw new IllegalArgumentException("A valid player name is required to save a score.");
+        if (score < 0)
+            throw new IllegalArgumentException("A negative score cannot be saved.");
+        if (selectedMap < 0 || selectedMap >= MAPS.length)
+            throw new IllegalArgumentException("The selected map is invalid.");
+
+        List<LeaderboardEntry> entries = loadLeaderboard();
+        LeaderboardEntry entry = new LeaderboardEntry(UUID.randomUUID().toString(), name, score,
+                "MAP-" + (selectedMap + 1), LocalDate.now().format(SCORE_DATE_FORMAT), System.currentTimeMillis());
+        entries.add(entry);
+        sortLeaderboard(entries);
+        if (entries.size() > 10)
+            entries.subList(10, entries.size()).clear();
+
+        StringBuilder saved = new StringBuilder();
+        for (LeaderboardEntry item : entries) {
+            if (saved.length() > 0)
+                saved.append('\n');
+            saved.append(item.id).append('|').append(item.score).append('|').append(item.map).append('|')
+                    .append(item.date).append('|').append(item.recordedAt).append('|')
+                    .append(Base64.getUrlEncoder().withoutPadding()
+                            .encodeToString(item.playerName.getBytes(StandardCharsets.UTF_8)));
+        }
+        PREFS.put(LEADERBOARD_KEY, saved.toString());
+        PREFS.flush();
+        currentLeaderboardEntryId = entry.id;
+    }
 
     // overlay (READY / PAUSED / GAME OVER / VICTORY)
     static boolean overlayVisible = false;
@@ -586,6 +691,7 @@ public class PacManGame extends JFrame {
                     lives--;
                     if (lives <= 0) {
                         gameOver = true;
+                        recordFinishedGame();
                         showOverlay("GAME OVER", "FINAL SCORE: " + score);
                     } else {
                         pacman.reset();
@@ -607,8 +713,21 @@ public class PacManGame extends JFrame {
                     }
             if (!left) {
                 gameOver = true;
+                recordFinishedGame();
                 showOverlay("VICTORY!", "YOU CLEARED THE MAZE!");
             }
+        }
+    }
+
+    static void recordFinishedGame() {
+        if (scoreRecordedForGame)
+            return;
+        scoreRecordedForGame = true;
+        try {
+            saveLeaderboardEntry();
+        } catch (BackingStoreException | IllegalArgumentException | IllegalStateException | SecurityException ex) {
+            JOptionPane.showMessageDialog(null, "The score could not be saved to the leaderboard.\n" + ex.getMessage(),
+                    "LEADERBOARD SAVE ERROR", JOptionPane.ERROR_MESSAGE);
         }
     }
 
@@ -616,6 +735,7 @@ public class PacManGame extends JFrame {
         applyMap(selectedMap);
         currentMap = copyMap();
         score = 0;
+        scoreRecordedForGame = false;
         lives = 3;
         gameOver = false;
         gamePaused = false;
@@ -897,7 +1017,8 @@ public class PacManGame extends JFrame {
     }
 
     /** Small vector icons that stand in for the FontAwesome icons. */
-    static final int ICON_NONE = 0, ICON_PLAY = 1, ICON_GAMEPAD = 2, ICON_USERS = 3, ICON_POWER = 4;
+    static final int ICON_NONE = 0, ICON_PLAY = 1, ICON_GAMEPAD = 2, ICON_USERS = 3, ICON_POWER = 4,
+            ICON_TROPHY = 5;
 
     static void drawIcon(Graphics2D g, int type, double cx, double cy, double size, Color c) {
         g.setColor(c);
@@ -934,6 +1055,19 @@ public class PacManGame extends JFrame {
                         new BasicStroke((float) Math.max(2, size / 8), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
                 g.draw(new Arc2D.Double(cx - h * 0.85, cy - h * 0.75, h * 1.7, h * 1.7, 120, 300, Arc2D.OPEN));
                 g.draw(new Line2D.Double(cx, cy - h, cx, cy - h * 0.05));
+                break;
+            }
+            case ICON_TROPHY: {
+                int x = (int) Math.round(cx), y = (int) Math.round(cy);
+                int u = Math.max(1, (int) Math.round(size / 8));
+                g.fillRect(x - 2 * u, y - 4 * u, 4 * u, u);
+                g.fillRect(x - 3 * u, y - 3 * u, 6 * u, u);
+                g.fillRect(x - 2 * u, y - 2 * u, 4 * u, u);
+                g.fillRect(x - u, y - u, 2 * u, 2 * u);
+                g.fillRect(x - 2 * u, y + u, 4 * u, u);
+                g.fillRect(x - 3 * u, y + 2 * u, 6 * u, u);
+                g.fillRect(x - 4 * u, y - 3 * u, u, 2 * u);
+                g.fillRect(x + 3 * u, y - 3 * u, u, 2 * u);
                 break;
             }
             default:
@@ -1022,7 +1156,7 @@ public class PacManGame extends JFrame {
             int baseline = (getHeight() - fm.getHeight()) / 2 + fm.getAscent();
             if (leftAligned) {
                 g.drawString(getText(), m + 16, baseline);
-                drawIcon(g, icon, getWidth() - m - 24, getHeight() / 2.0, 12, text);
+                drawIcon(g, icon, getWidth() - m - 24, getHeight() / 2.0, icon == ICON_TROPHY ? 16 : 12, text);
             } else {
                 drawCentered(g, getText(), getWidth() / 2, baseline);
             }
@@ -1209,8 +1343,10 @@ public class PacManGame extends JFrame {
     /** The game canvas (blue neon frame + maze + overlay). */
     static class CanvasPanel extends JPanel {
         final ArcadeButton overlayBtn;
+        final JLabel caption;
 
-        CanvasPanel() {
+        CanvasPanel(JLabel caption) {
+            this.caption = caption;
             setOpaque(false);
             setLayout(null);
             setPreferredSize(new Dimension(CANVAS_W + 2 * CANVAS_PAD + 16, CANVAS_H + 2 * CANVAS_PAD + 16));
@@ -1243,6 +1379,11 @@ public class PacManGame extends JFrame {
         public void doLayout() {
             // fixed size, centered under the "GAME OVER" text
             overlayBtn.setBounds((getWidth() - 170) / 2, getHeight() / 2 + 28, 170, 54);
+            double s = scale();
+            int ph = (int) Math.round(mapH() * s + 2 * (8 + CANVAS_PAD));
+            int oy = (getHeight() - ph) / 2;
+            Dimension captionSize = caption.getPreferredSize();
+            caption.setBounds(0, oy + ph - 3, getWidth(), captionSize.height);
         }
 
         /** How much the maze is scaled up to fit the panel. */
@@ -1387,7 +1528,7 @@ public class PacManGame extends JFrame {
         FramePanel root = new FramePanel();
         root.setLayout(new BorderLayout());
         root.setBorder(new EmptyBorder(32, 32, 32, 32));
-        root.setPreferredSize(new Dimension(920, 700));
+        root.setPreferredSize(new Dimension(920, 780));
 
         root.add(buildHeader(), BorderLayout.NORTH);
 
@@ -1476,18 +1617,22 @@ public class PacManGame extends JFrame {
         box.setLayout(new BoxLayout(box, BoxLayout.Y_AXIS));
         box.setBorder(new EmptyBorder(24, 28, 24, 28));
         box.setAlignmentX(CENTER_ALIGNMENT);
-        box.setMaximumSize(new Dimension(470, 330));
-        box.setPreferredSize(new Dimension(470, 330));
+        box.setMaximumSize(new Dimension(470, 400));
+        box.setPreferredSize(new Dimension(470, 400));
 
         ArcadeButton start = menuButton("> START GAME", ICON_PLAY);
+        ArcadeButton leaderboard = menuButton("> LEADERBOARD", ICON_TROPHY);
         ArcadeButton how = menuButton("> HOW TO PLAY", ICON_GAMEPAD);
         ArcadeButton about = menuButton("> ABOUT US", ICON_USERS);
         ArcadeButton exit = menuButton("> EXIT", ICON_POWER);
         start.addActionListener(e -> cards.show(center, "maps"));
+        leaderboard.addActionListener(e -> showLeaderboard());
         how.addActionListener(e -> showHowToPlay());
         about.addActionListener(e -> showAboutUs());
         exit.addActionListener(e -> showExit());
         box.add(start);
+        box.add(Box.createVerticalStrut(8));
+        box.add(leaderboard);
         box.add(Box.createVerticalStrut(8));
         box.add(how);
         box.add(Box.createVerticalStrut(8));
@@ -1545,7 +1690,9 @@ public class PacManGame extends JFrame {
         // screen.add(holder, BorderLayout.CENTER);
 
         // Map - 2
-        canvasPanel = new CanvasPanel();
+        canvasPanel = new CanvasPanel(mapCaption);
+        mapCaption.setHorizontalAlignment(SwingConstants.CENTER);
+        canvasPanel.add(mapCaption);
         screen.add(canvasPanel, BorderLayout.CENTER);
 
         JPanel bottom = new JPanel(new BorderLayout());
@@ -1556,16 +1703,19 @@ public class PacManGame extends JFrame {
             cards.show(center, "menu");
             gameStarted = false;
         });
+        JPanel west = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        west.setOpaque(false);
+        west.add(back);
         ArcadeButton pause = smallButton("PAUSE");
         pause.addActionListener(e -> togglePause("PRESS PAUSE TO RESUME"));
-        bottom.add(back, BorderLayout.WEST);
-        mapCaption.setHorizontalAlignment(SwingConstants.CENTER);
         JPanel east = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
         east.setOpaque(false);
         east.add(pause);
         ArcadeButton exitBtn = smallButton("EXIT");
         exitBtn.addActionListener(e -> showExit());
         east.add(exitBtn);
+        west.setPreferredSize(new Dimension(east.getPreferredSize().width, back.getPreferredSize().height));
+        bottom.add(west, BorderLayout.WEST);
         bottom.add(east, BorderLayout.EAST);
         screen.add(bottom, BorderLayout.SOUTH);
         return screen;
@@ -1589,9 +1739,7 @@ public class PacManGame extends JFrame {
             card.setMaximumSize(new Dimension(640, 110));
             card.addActionListener(e -> {
                 selectedMap = idx;
-                mapCaption.setText("MAP " + (idx + 1) + ": " + MAP_NAMES[idx]);
-                cards.show(center, "game");
-                startNewGame();
+                showPlayerName();
             });
             p.add(card);
             p.add(Box.createVerticalStrut(6));
@@ -1605,6 +1753,108 @@ public class PacManGame extends JFrame {
         p.add(back);
         p.add(Box.createVerticalGlue());
         return p;
+    }
+
+    void showPlayerName() {
+        buildPlayerName(true).setVisible(true);
+    }
+
+    JDialog buildPlayerName(boolean modal) {
+        JPanel p = new JPanel();
+        p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
+        p.setBorder(new EmptyBorder(8, 12, 8, 12));
+
+        JLabel title = label("ENTER YOUR NAME", pixel(20f), YELLOW400);
+        title.setAlignmentX(CENTER_ALIGNMENT);
+        JLabel map = label("MAP: " + MAP_NAMES[selectedMap], vt(24f), CYAN300);
+        map.setAlignmentX(CENTER_ALIGNMENT);
+
+        JTextField nameField = new JTextField(playerName, 16);
+        nameField.setFont(vt(28f));
+        nameField.setForeground(Color.WHITE);
+        nameField.setCaretColor(CYAN300);
+        nameField.setSelectionColor(PURPLE600);
+        nameField.setBackground(SLATE950);
+        nameField.setBorder(new CompoundBorder(new LineBorder(PURPLE500, 2, true),
+                new EmptyBorder(8, 12, 8, 12)));
+        nameField.setMaximumSize(new Dimension(420, 54));
+        nameField.setAlignmentX(CENTER_ALIGNMENT);
+        ((AbstractDocument) nameField.getDocument()).setDocumentFilter(new DocumentFilter() {
+            @Override
+            public void insertString(FilterBypass fb, int offset, String text, AttributeSet attr)
+                    throws BadLocationException {
+                if (text != null && fb.getDocument().getLength() + text.length() <= 12)
+                    super.insertString(fb, offset, text, attr);
+            }
+
+            @Override
+            public void replace(FilterBypass fb, int offset, int length, String text, AttributeSet attrs)
+                    throws BadLocationException {
+                String replacement = text == null ? "" : text;
+                int newLength = fb.getDocument().getLength() - length + replacement.length();
+                if (newLength <= 12)
+                    super.replace(fb, offset, length, replacement, attrs);
+            }
+        });
+
+        JLabel error = label(" ", vt(18f), RED500);
+        error.setAlignmentX(CENTER_ALIGNMENT);
+        ArcadeButton start = new ArcadeButton("START GAME", ICON_PLAY, MENU_BTN_BG, PURPLE400,
+                PURPLE200, 13f, true, 8);
+        start.setPreferredSize(new Dimension(320, 54));
+        start.setMaximumSize(new Dimension(320, 54));
+        start.setAlignmentX(CENTER_ALIGNMENT);
+        ArcadeButton back = smallButton("< BACK");
+        back.setAlignmentX(CENTER_ALIGNMENT);
+
+        p.add(title);
+        p.add(Box.createVerticalStrut(18));
+        p.add(map);
+        p.add(Box.createVerticalStrut(18));
+        p.add(nameField);
+        p.add(Box.createVerticalStrut(8));
+        p.add(error);
+        p.add(Box.createVerticalStrut(10));
+        p.add(start);
+        p.add(Box.createVerticalStrut(8));
+        p.add(back);
+
+        JDialog d = makeDialog(p, PURPLE500, PURPLE400, modal);
+        d.getRootPane().setDefaultButton(start);
+        d.getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
+                .put(KeyStroke.getKeyStroke("ENTER"), "startGame");
+        d.getRootPane().getActionMap().put("startGame", new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                start.doClick();
+            }
+        });
+        start.addActionListener(e -> {
+            String trimmedName = nameField.getText().trim();
+            if (trimmedName.isEmpty()) {
+                error.setText("PLEASE ENTER A NAME");
+                return;
+            }
+            if (trimmedName.length() > 12) {
+                error.setText("NAME MUST BE 12 CHARACTERS OR LESS");
+                return;
+            }
+            playerName = trimmedName;
+            mapCaption.setText("PLAYER: " + playerName + "  |  MAP-" + (selectedMap + 1) + ": "
+                    + MAP_NAMES[selectedMap]);
+            d.dispose();
+            cards.show(center, "game");
+            startNewGame();
+        });
+        back.addActionListener(e -> d.dispose());
+        d.addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowOpened(WindowEvent e) {
+                nameField.requestFocusInWindow();
+                nameField.selectAll();
+            }
+        });
+        return d;
     }
 
     ArcadeButton smallButton(String text) {
@@ -1829,6 +2079,144 @@ public class PacManGame extends JFrame {
         p.add(close);
 
         JDialog d = makeDialog(p, PINK500, PINK, modal);
+        close.addActionListener(e -> d.dispose());
+        return d;
+    }
+
+    static class LeaderboardTable extends JPanel {
+        final List<LeaderboardEntry> entries;
+        final String highlightedEntryId;
+
+        LeaderboardTable(List<LeaderboardEntry> entries, String highlightedEntryId) {
+            this.entries = entries;
+            this.highlightedEntryId = highlightedEntryId;
+            setOpaque(false);
+            setPreferredSize(new Dimension(760, 400));
+        }
+
+        @Override
+        protected void paintComponent(Graphics g0) {
+            Graphics2D g = aa(g0);
+            int left = 8, right = getWidth() - 8, bottom = getHeight() - 5;
+            int width = right - left;
+            int rankEnd = left + 58;
+            int playerEnd = left + (int) (width * 0.43);
+            int scoreEnd = left + (int) (width * 0.64);
+            int mapEnd = left + (int) (width * 0.81);
+            int[] columns = { left, rankEnd, playerEnd, scoreEnd, mapEnd, right };
+            int headerBottom = 38;
+            int rowHeight = (bottom - headerBottom) / 10;
+
+            g.setColor(new Color(0x020617));
+            g.fillRoundRect(left, 2, width, bottom, 10, 10);
+            for (int row = 0; row < 10; row++) {
+                if (row < entries.size() && entries.get(row).id.equals(highlightedEntryId)) {
+                    g.setColor(new Color(147, 51, 234, 48));
+                    g.fillRect(left + 1, headerBottom + row * rowHeight + 1, width - 2, rowHeight);
+                }
+            }
+
+            g.setFont(vt(20f));
+            g.setColor(CYAN300);
+            FontMetrics headerMetrics = g.getFontMetrics();
+            drawCentered(g, "#", (columns[0] + columns[1]) / 2, (headerBottom - headerMetrics.getHeight()) / 2
+                    + headerMetrics.getAscent() + 2);
+            g.drawString("PLAYER", columns[1] + 12, (headerBottom - headerMetrics.getHeight()) / 2
+                    + headerMetrics.getAscent() + 2);
+            drawCentered(g, "SCORE", (columns[2] + columns[3]) / 2, (headerBottom - headerMetrics.getHeight()) / 2
+                    + headerMetrics.getAscent() + 2);
+            drawCentered(g, "MAP", (columns[3] + columns[4]) / 2, (headerBottom - headerMetrics.getHeight()) / 2
+                    + headerMetrics.getAscent() + 2);
+            drawCentered(g, "DATE", (columns[4] + columns[5]) / 2, (headerBottom - headerMetrics.getHeight()) / 2
+                    + headerMetrics.getAscent() + 2);
+
+            g.setColor(alpha(PURPLE500, 180));
+            g.setStroke(new BasicStroke(1f));
+            g.drawRoundRect(left, 2, width, bottom, 10, 10);
+            g.drawLine(left + 1, headerBottom, right - 1, headerBottom);
+            for (int column : columns)
+                g.drawLine(column, 3, column, bottom + 1);
+
+            g.setFont(vt(20f));
+            FontMetrics rowMetrics = g.getFontMetrics();
+            for (int row = 0; row < 10; row++) {
+                int rowTop = headerBottom + row * rowHeight;
+                int baseline = rowTop + (rowHeight - rowMetrics.getHeight()) / 2 + rowMetrics.getAscent();
+                if (row < entries.size()) {
+                    LeaderboardEntry entry = entries.get(row);
+                    Color rankColor = row == 0 ? YELLOW400 : row == 1 ? SLATE300 : row == 2 ? PINK400 : CYAN300;
+                    g.setColor(rankColor);
+                    drawCentered(g, String.valueOf(row + 1), (columns[0] + columns[1]) / 2, baseline);
+                    g.setColor(entry.id.equals(highlightedEntryId) ? YELLOW300 : Color.WHITE);
+                    g.drawString((entry.id.equals(highlightedEntryId) ? "> " : "") + entry.playerName,
+                            columns[1] + 12, baseline);
+                    g.setColor(row < 3 ? rankColor : CYAN300);
+                    drawCentered(g, String.format(Locale.US, "%,d", entry.score),
+                            (columns[2] + columns[3]) / 2, baseline);
+                    g.setColor(SLATE300);
+                    drawCentered(g, entry.map, (columns[3] + columns[4]) / 2, baseline);
+                    drawCentered(g, entry.date, (columns[4] + columns[5]) / 2, baseline);
+                } else {
+                    g.setColor(SLATE600);
+                    drawCentered(g, String.valueOf(row + 1), (columns[0] + columns[1]) / 2, baseline);
+                    drawCentered(g, "---", (columns[1] + columns[2]) / 2, baseline);
+                    drawCentered(g, "---", (columns[2] + columns[3]) / 2, baseline);
+                    drawCentered(g, "---", (columns[3] + columns[4]) / 2, baseline);
+                    drawCentered(g, "--/--/--", (columns[4] + columns[5]) / 2, baseline);
+                }
+                g.setColor(alpha(PURPLE500, 70));
+                g.drawLine(left + 1, rowTop + rowHeight, right - 1, rowTop + rowHeight);
+            }
+            g.dispose();
+        }
+    }
+
+    JDialog buildLeaderboard(boolean modal) {
+        JPanel p = new JPanel();
+        p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
+        p.setBorder(new EmptyBorder(8, 12, 8, 12));
+        p.setPreferredSize(new Dimension(790, 515));
+
+        JPanel heading = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 0));
+        heading.setOpaque(false);
+        JPanel trophy = new JPanel() {
+            @Override
+            protected void paintComponent(Graphics g0) {
+                Graphics2D g = aa(g0);
+                drawIcon(g, ICON_TROPHY, getWidth() / 2.0, getHeight() / 2.0, 18, YELLOW400);
+                g.dispose();
+            }
+        };
+        trophy.setOpaque(false);
+        trophy.setPreferredSize(new Dimension(28, 30));
+        heading.add(trophy);
+        heading.add(label("TOP 10 LEADERBOARD", pixel(20f), YELLOW400));
+        heading.setAlignmentX(CENTER_ALIGNMENT);
+
+        LeaderboardTable table = new LeaderboardTable(loadLeaderboard(), currentLeaderboardEntryId);
+        table.setAlignmentX(CENTER_ALIGNMENT);
+
+        JPanel actions = new JPanel(new FlowLayout(FlowLayout.CENTER, 14, 0));
+        actions.setOpaque(false);
+        ArcadeButton menu = smallButton("< MENU");
+        ArcadeButton close = smallButton("CLOSE");
+        menu.setPreferredSize(new Dimension(170, 48));
+        close.setPreferredSize(new Dimension(170, 48));
+        actions.add(menu);
+        actions.add(close);
+        actions.setAlignmentX(CENTER_ALIGNMENT);
+
+        p.add(heading);
+        p.add(Box.createVerticalStrut(8));
+        p.add(table);
+        p.add(Box.createVerticalStrut(10));
+        p.add(actions);
+
+        JDialog d = makeDialog(p, PURPLE500, PURPLE400, modal);
+        menu.addActionListener(e -> {
+            d.dispose();
+            cards.show(center, "menu");
+        });
         close.addActionListener(e -> d.dispose());
         return d;
     }
@@ -2099,6 +2487,15 @@ public class PacManGame extends JFrame {
         buildHowToPlay(true).setVisible(true);
         if (gameStarted && !wasPaused && !gameOver) {
             gamePaused = false;
+        }
+    }
+
+    void showLeaderboard() {
+        try {
+            buildLeaderboard(true).setVisible(true);
+        } catch (IllegalStateException | SecurityException ex) {
+            JOptionPane.showMessageDialog(this, "The leaderboard could not be loaded.\n" + ex.getMessage(),
+                    "LEADERBOARD ERROR", JOptionPane.ERROR_MESSAGE);
         }
     }
 
